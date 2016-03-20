@@ -1,6 +1,21 @@
 *.class
 *.log
 
+# Mac-specific
+*.DS_Store
+
+# Artifact folders
+bin/
+.cache-main
+.classpath
+.project
+.settings/
+model/
+*tmp/
+*log/
+*node_modules/
+*typings/
+
 # sbt specific
 .cache
 .history
@@ -15,3 +30,11 @@ project/plugins/project/
 # Scala-IDE specific
 .scala_dependencies
 .worksheet
+.idea
+*.iml
+
+# Python specific
+__pycache__/
+
+# Do not check in the security directory
+security/
