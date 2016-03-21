@@ -2,6 +2,7 @@ import pandas as pd
 import os
 import html.parser
 from utils.parser.pitch import Pitch
+from utils.parser.seedr import page_loader
 
 pd.set_option('display.max_columns', 200)
 pd.set_option('display.width', 500)
@@ -24,28 +25,31 @@ class SummaryParser(html.parser.HTMLParser):
             for (key, value) in attrs:
                 if key == 'data-campaign-categories':
                     sectors = [s.strip(' ') for s in value.split(',')]
-                    self.current_pitch.sector_1 = sectors.pop() if len(sectors) > 0 else None
-                    self.current_pitch.sector_2 = sectors.pop() if len(sectors) > 0 else None
-                    self.current_pitch.sector_3 = ','.join(sectors)
+                    p = self.current_pitch
+                    (p.sector_1, p.sector_2, p.sector_3) = self._parse_sectors(sectors)
                 elif key == 'data-campaign-id':
-                    self.current_pitch.campaign_id = value
+                    self.current_pitch.pitch_id = value
                 elif key == 'data-campaign-name':
                     self.current_pitch.company = value
                 elif key == 'data-campaign-type':
                     self.current_pitch.type = value
 
         elif self.current_pitch is not None:
+            is_pitch_link = False
             for (key, value) in attrs:
                 if key == 'class':
                     values = value.split(' ')
-                    if 'CampaignCard-country' in values:
-                        self.mode = 'country'
-                    elif 'CampaignCard-taxIncentives' in values:
+                    if 'CampaignCard-taxIncentives' in values:
                         self.mode = 'taxIncentives'
                     elif 'CampaignCard-statTitle' in values:
                         self.mode = 'stats'
                     elif 'CampaignCard-progressMessage' in values:
                         self.mode = 'CampaignCard-progressMessage'
+                    elif 'Card-link' in values:
+                        is_pitch_link = True
+                elif key == 'href' and is_pitch_link:
+                    self.current_pitch.pitch_url = 'https://www.seedrs.com{0}'.format(value)
+                    is_pitch_link = False
 
     def handle_endtag(self, tag):
         if tag == 'article':
@@ -58,11 +62,7 @@ class SummaryParser(html.parser.HTMLParser):
         if len(data) == 0:
             return
 
-        if self.mode == 'country':
-            self.current_pitch.country = data
-            self.mode = None
-
-        elif self.mode == 'taxIncentives':
+        if self.mode == 'taxIncentives':
             self.current_pitch.scheme = data
             self.mode = None
 
@@ -87,17 +87,48 @@ class SummaryParser(html.parser.HTMLParser):
             self.mode = None
 
         elif self.mode == 'CampaignCard-progressMessage':
-            self.current_pitch.days_left = data
+            self.current_pitch.days_left = self._parse_days(data)
             self.mode = None
+
+    def _parse_days(self, data: str):
+        # Examples:
+        #       23 days to go - 24% Funded          -> 23
+        #       Open for investment - 100% Funded   -> None
+        if data and len(data) > 0:
+            possible_days = data.split(' ')
+            try:
+                return int(possible_days[0])
+            except:
+                return None
+        else:
+            return None
+
+    def _parse_sectors(self, sectors: list) -> (str, str, str):
+        s1 = None
+        s2 = None
+        s3 = []
+
+        for sector in sectors:
+            assert(isinstance(sector, str))
+            s1_match = [sector.find(s) != -1 for s in ['B2B', 'B2C', 'B2G']]
+            s1_filter = [match for match in filter(lambda s: s, s1_match)]
+            if len(s1_filter) > 0:
+                s1 = sector
+            elif sector.startswith('Mixed') or sector in ['Digital', 'Non-Digital']:
+                s2 = sector
+            else:
+                s3.append(sector)
+
+        return s1, s2, ','.join(s3)
+
 
 
 class DetailParser(html.parser.HTMLParser):
-    def __init__(self, pitches: dict):
+    def __init__(self, pitch: Pitch):
         super().__init__()
-        self.pitches = pitches
+        self.pitch = pitch
         self.mode = None
         self.mode_active = False
-        self.current_pitch = None
 
     def handle_starttag(self, tag, attrs):
         if tag == 'dd' and self.mode:
@@ -105,10 +136,7 @@ class DetailParser(html.parser.HTMLParser):
 
         else:
             for (key, value) in attrs:
-                if key == 'data-campaign-name':
-                    self.current_pitch = self.pitches[value]
-
-                elif key == 'class':
+                if key == 'class':
                     values = value.split(' ')
                     if 'investment_already_funded' in values:
                         self.mode = 'investment_already_funded'
@@ -124,30 +152,27 @@ class DetailParser(html.parser.HTMLParser):
         return
 
     def handle_data(self, data):
-        if not self.current_pitch:
-            return
-
         if isinstance(data, str):
             data = data.strip(' ').replace('\n','')
             if len(data) > 0:
                 if self.mode_active:
                     if self.mode == 'investment_already_funded':
-                        self.current_pitch.investment_received = data
+                        self.pitch.investment_received = data
                         self.mode = None
                         self.mode_active = False
 
                     elif self.mode == 'Incorporation date':
-                        self.current_pitch.founded = data
+                        self.pitch.founded = data
                         self.mode = None
                         self.mode_active = False
 
                     elif self.mode == 'Registered number':
-                        self.current_pitch.company_number = data
+                        self.pitch.company_number = data
                         self.mode = None
                         self.mode_active = False
 
                     elif self.mode == 'location':
-                        self.current_pitch.location = data
+                        self.pitch.location = data
                         self.mode = None
                         self.mode_active = False
 
@@ -156,35 +181,23 @@ class DetailParser(html.parser.HTMLParser):
                 elif data == 'Registered number':
                     self.mode = 'Registered number'
 
+
 def parse() -> pd.DataFrame:
-    src_dir = '../../data/Seedrs'
-    files = os.listdir(src_dir)
-    rows = {}
-    for file in files:
-        if not file.endswith('.html'):
-            continue
+    pitches_url = 'https://www.seedrs.com/invest'
+    pitches_html = page_loader.get_page(pitches_url)
+    pitches_parser = SummaryParser()
+    pitches_parser.feed(pitches_html)
+    print('SEEDR - Found {0} open pitches'.format(len(pitches_parser.pitches)))
 
-        abs_file = '{0}/{1}'.format(src_dir, file)
-        if os.path.isfile(abs_file):
-            html = open(abs_file, 'rt').read()
-            parser = SummaryParser()
-            parser.feed(html)
-            for pitch in parser.pitches:
-                rows[pitch.company] = pitch
+    for pitch in pitches_parser.pitches:
+        if pitch.pitch_url:
+            print('SEEDR - Fetching pitch data from {0}'.format(pitch.pitch_url))
+            pitch_html = page_loader.get_page(pitch.pitch_url)
+            pitch_parser = DetailParser(pitch)
+            pitch_parser.feed(pitch_html)
 
-    src_dir = '../../data/Seedrs/detail'
-    files = os.listdir(src_dir)
-    for file in files:
-        if not file.endswith('.html'):
-            continue
-
-        abs_file = '{0}/{1}'.format(src_dir, file)
-        if os.path.isfile(abs_file):
-            html = open(abs_file, 'rt').read()
-            parser = DetailParser(rows)
-            parser.feed(html)
-
-    df = pd.DataFrame([row.__dict__ for row in rows.values()])
+    df = pd.DataFrame([pitch.__dict__ for pitch in pitches_parser.pitches])
     df = df.dropna(axis=0, how='all')
     df['Source'] = 'Seedrs'
     return df
+

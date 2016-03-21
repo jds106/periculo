@@ -1,12 +1,11 @@
 
 class Pitch:
-    campaign_id = None
-    company_url = None
+    pitch_id = None
+    pitch_url = None
     company = None
     founded = None
     company_number = None
     location = None
-    country = None
     equity_perc_offered = None
     investment_required = None
     investment_received = None
